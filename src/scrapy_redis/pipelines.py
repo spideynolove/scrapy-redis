@@ -3,6 +3,7 @@ from scrapy.utils.serialize import ScrapyJSONEncoder
 from twisted.internet.threads import deferToThread
 
 from . import connection, defaults
+from .utils import get_effective_key
 
 default_serialize = ScrapyJSONEncoder().encode
 
@@ -20,7 +21,7 @@ class RedisPipeline:
     """
 
     def __init__(
-        self, server, key=defaults.PIPELINE_KEY, serialize_func=default_serialize
+        self, server, key=defaults.PIPELINE_KEY, serialize_func=default_serialize, settings=None
     ):
         """Initialize pipeline.
 
@@ -32,16 +33,20 @@ class RedisPipeline:
             Redis key where to store items.
         serialize_func : callable
             Items serializer function.
+        settings : scrapy.settings.Settings, optional
+            Settings for job-scoped key support
 
         """
         self.server = server
         self.key = key
         self.serialize = serialize_func
+        self.settings = settings
 
     @classmethod
     def from_settings(cls, settings):
         params = {
             "server": connection.from_settings(settings),
+            "settings": settings,
         }
         if settings.get("REDIS_ITEMS_KEY"):
             params["key"] = settings["REDIS_ITEMS_KEY"]
@@ -70,4 +75,13 @@ class RedisPipeline:
         and/or spider.
 
         """
-        return self.key % {"spider": spider.name}
+        if self.settings:
+            return get_effective_key(
+                self.settings,
+                self.key,
+                defaults.JOB_SCOPED_PIPELINE_KEY,
+                spider.name
+            )
+        else:
+            # Fallback for when settings is not available
+            return self.key % {"spider": spider.name}

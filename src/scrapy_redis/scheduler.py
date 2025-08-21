@@ -1,11 +1,13 @@
 import importlib
+import os
 
 from scrapy.utils.misc import load_object
 
 from . import connection, defaults
+from .utils import get_effective_key
+from .serializers import get_serializer
 
 
-# TODO: add SCRAPY_JOB support.
 class Scheduler:
     """Redis-based scheduler
 
@@ -42,6 +44,7 @@ class Scheduler:
         dupefilter_cls=defaults.SCHEDULER_DUPEFILTER_CLASS,
         idle_before_close=0,
         serializer=None,
+        job_id=None,
     ):
         """Initialize scheduler.
 
@@ -65,6 +68,8 @@ class Scheduler:
             Importable path to the dupefilter class.
         idle_before_close : int
             Timeout before giving up.
+        job_id : str, optional
+            Job identifier for unique naming. Uses SCRAPY_JOB env var if not provided.
 
         """
         if idle_before_close < 0:
@@ -80,6 +85,7 @@ class Scheduler:
         self.dupefilter_key = dupefilter_key
         self.idle_before_close = idle_before_close
         self.serializer = serializer
+        self.job_id = job_id or os.environ.get('SCRAPY_JOB')
         self.stats = None
 
     def __len__(self):
@@ -94,18 +100,28 @@ class Scheduler:
         }
 
         # If these values are missing, it means we want to use the defaults.
+        # Using custom prefixes specific to scrapy-redis for better clarity
         optional = {
-            # TODO: Use custom prefixes for this settings to note that are
-            # specific to scrapy-redis.
+            "queue_key": "SCRAPY_REDIS_SCHEDULER_QUEUE_KEY",
+            "queue_cls": "SCRAPY_REDIS_SCHEDULER_QUEUE_CLASS",
+            "dupefilter_key": "SCRAPY_REDIS_SCHEDULER_DUPEFILTER_KEY",
+            "dupefilter_cls": "SCRAPY_REDIS_DUPEFILTER_CLASS",
+            "serializer": "SCRAPY_REDIS_SCHEDULER_SERIALIZER",
+        }
+
+        # Fallback to legacy setting names for backward compatibility
+        legacy_fallbacks = {
             "queue_key": "SCHEDULER_QUEUE_KEY",
             "queue_cls": "SCHEDULER_QUEUE_CLASS",
             "dupefilter_key": "SCHEDULER_DUPEFILTER_KEY",
-            # We use the default setting name to keep compatibility.
             "dupefilter_cls": "DUPEFILTER_CLASS",
             "serializer": "SCHEDULER_SERIALIZER",
         }
         for name, setting_name in optional.items():
             val = settings.get(setting_name)
+            # Fallback to legacy setting name if the new one is not found
+            if not val and name in legacy_fallbacks:
+                val = settings.get(legacy_fallbacks[name])
             if val:
                 kwargs[name] = val
 
@@ -113,9 +129,17 @@ class Scheduler:
         if not hasattr(dupefilter_cls, "from_spider"):
             kwargs["dupefilter"] = dupefilter_cls.from_settings(settings)
 
-        # Support serializer as a path to a module.
-        if isinstance(kwargs.get("serializer"), str):
-            kwargs["serializer"] = importlib.import_module(kwargs["serializer"])
+        # Handle serializer setting - use new serializer system
+        serializer_setting = kwargs.get("serializer") or settings.get("SCHEDULER_SERIALIZER")
+        if serializer_setting:
+            try:
+                kwargs["serializer"] = get_serializer(serializer_setting)
+            except (ValueError, TypeError) as e:
+                # Fallback to old behavior for backward compatibility
+                if isinstance(serializer_setting, str):
+                    kwargs["serializer"] = importlib.import_module(serializer_setting)
+                else:
+                    raise e
 
         server = connection.from_settings(settings)
         # Ensure the connection is working.
@@ -133,11 +157,19 @@ class Scheduler:
     def open(self, spider):
         self.spider = spider
 
+        # Get effective queue key using job-scoped logic if enabled
+        effective_queue_key = get_effective_key(
+            spider.settings,
+            self.queue_key,
+            defaults.JOB_SCOPED_SCHEDULER_QUEUE_KEY,
+            spider.name
+        )
+        
         try:
             self.queue = load_object(self.queue_cls)(
                 server=self.server,
                 spider=spider,
-                key=self.queue_key % {"spider": spider.name},
+                key=effective_queue_key,
                 serializer=self.serializer,
             )
         except TypeError as e:

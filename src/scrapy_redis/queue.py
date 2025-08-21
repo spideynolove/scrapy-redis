@@ -1,9 +1,11 @@
+import warnings
+
 try:
     from scrapy.utils.request import request_from_dict
 except ImportError:
     from scrapy.utils.reqser import request_to_dict, request_from_dict
 
-from . import picklecompat
+from .serializers import get_serializer
 
 
 class Base:
@@ -25,9 +27,9 @@ class Base:
 
         """
         if serializer is None:
-            # Backward compatibility.
-            # TODO: deprecate pickle.
-            serializer = picklecompat
+            # Use JSON as default serializer instead of pickle for better compatibility
+            # and performance. Pickle is deprecated for security and portability reasons.
+            serializer = get_serializer('json')
         if not hasattr(serializer, "loads"):
             raise TypeError(
                 f"serializer does not implement 'loads' function: {serializer}"
@@ -149,7 +151,21 @@ class LifoQueue(Base):
             return self._decode_request(data)
 
 
-# TODO: Deprecate the use of these names.
-SpiderQueue = FifoQueue
-SpiderStack = LifoQueue
-SpiderPriorityQueue = PriorityQueue
+# Deprecated aliases for backward compatibility
+def __getattr__(name):
+    """Handle deprecated class name access with warnings."""
+    aliases = {
+        'SpiderQueue': FifoQueue,
+        'SpiderStack': LifoQueue,
+        'SpiderPriorityQueue': PriorityQueue
+    }
+
+    if name in aliases:
+        warnings.warn(
+            f"{name} is deprecated, use {aliases[name].__name__} instead",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        return aliases[name]
+
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

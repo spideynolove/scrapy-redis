@@ -1,7 +1,9 @@
 import hashlib
 import json
 import logging
+import os
 import time
+import warnings
 
 from scrapy.dupefilters import BaseDupeFilter
 from scrapy.utils.python import to_unicode
@@ -9,12 +11,12 @@ from w3lib.url import canonicalize_url
 
 from . import defaults
 from .connection import get_redis_from_settings
+from .utils import get_effective_key
 
 logger = logging.getLogger(__name__)
 
 
-# TODO: Rename class to RedisDupeFilter.
-class RFPDupeFilter(BaseDupeFilter):
+class RedisDupeFilter(BaseDupeFilter):
     """Redis-based request duplicates filter.
 
     This class can also be used with default Scrapy's scheduler.
@@ -55,8 +57,8 @@ class RFPDupeFilter(BaseDupeFilter):
 
         Returns
         -------
-        RFPDupeFilter
-            A RFPDupeFilter instance.
+        RedisDupeFilter
+            A RedisDupeFilter instance.
 
 
         """
@@ -64,8 +66,9 @@ class RFPDupeFilter(BaseDupeFilter):
         # XXX: This creates one-time key. needed to support to use this
         # class as standalone dupefilter with scrapy's default scheduler
         # if scrapy passes spider on open() method this wouldn't be needed
-        # TODO: Use SCRAPY_JOB env as default and fallback to timestamp.
-        key = defaults.DUPEFILTER_KEY % {"timestamp": int(time.time())}
+        # Use SCRAPY_JOB environment variable if available, otherwise fallback to timestamp
+        job_id = os.environ.get('SCRAPY_JOB', int(time.time()))
+        key = defaults.DUPEFILTER_KEY % {"timestamp": job_id}
         debug = settings.getbool("DUPEFILTER_DEBUG")
         return cls(server, key=key, debug=debug)
 
@@ -79,8 +82,8 @@ class RFPDupeFilter(BaseDupeFilter):
 
         Returns
         -------
-        RFPDupeFilter
-            Instance of RFPDupeFilter.
+        RedisDupeFilter
+            Instance of RedisDupeFilter.
 
         """
         return cls.from_settings(crawler.settings)
@@ -129,9 +132,15 @@ class RFPDupeFilter(BaseDupeFilter):
         dupefilter_key = settings.get(
             "SCHEDULER_DUPEFILTER_KEY", defaults.SCHEDULER_DUPEFILTER_KEY
         )
-        key = dupefilter_key % {"spider": spider.name}
+        # Use job-scoped key if enabled
+        effective_key = get_effective_key(
+            settings,
+            dupefilter_key,
+            defaults.JOB_SCOPED_SCHEDULER_DUPEFILTER_KEY,
+            spider.name
+        )
         debug = settings.getbool("DUPEFILTER_DEBUG")
-        return cls(server, key=key, debug=debug)
+        return cls(server, key=effective_key, debug=debug)
 
     def close(self, reason=""):
         """Delete data on close. Called by Scrapy's scheduler.
@@ -167,3 +176,15 @@ class RFPDupeFilter(BaseDupeFilter):
             )
             self.logger.debug(msg, {"request": request}, extra={"spider": spider})
             self.logdupes = False
+
+
+# Backward compatibility alias
+class RFPDupeFilter(RedisDupeFilter):
+    """Deprecated alias for RedisDupeFilter. Use RedisDupeFilter instead."""
+    def __init__(self, *args, **kwargs):
+        warnings.warn(
+            "RFPDupeFilter is deprecated, use RedisDupeFilter instead",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        super().__init__(*args, **kwargs)

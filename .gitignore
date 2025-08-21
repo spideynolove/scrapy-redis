@@ -65,3 +65,7 @@ target/
 # Extra
 .DS_Store
 .vscode
+
+# user define
+MY_TODOs.md
+.serena/

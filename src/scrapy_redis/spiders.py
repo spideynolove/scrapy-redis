@@ -10,7 +10,7 @@ from scrapy.spiders import CrawlSpider, Spider
 from scrapy_redis.utils import TextColor
 
 from . import connection, defaults
-from .utils import bytes_to_str, is_dict
+from .utils import bytes_to_str, is_dict, get_effective_key
 
 
 class RedisMixin:
@@ -51,12 +51,17 @@ class RedisMixin:
         settings = crawler.settings
 
         if self.redis_key is None:
-            self.redis_key = settings.get(
+            redis_key_template = settings.get(
                 "REDIS_START_URLS_KEY",
                 defaults.START_URLS_KEY,
             )
-
-        self.redis_key = self.redis_key % {"name": self.name}
+            # Use job-scoped key logic
+            self.redis_key = get_effective_key(
+                settings,
+                redis_key_template,
+                defaults.JOB_SCOPED_START_URLS_KEY,
+                self.name
+            )
 
         if not self.redis_key.strip():
             raise ValueError("redis_key must not be empty")
@@ -206,14 +211,36 @@ class RedisMixin:
         )
 
     def schedule_next_requests(self):
-        """Schedules a request if available"""
-        # TODO: While there is capacity, schedule a batch of redis requests.
+        """Schedules requests in batches while there is capacity available."""
+        scheduled = 0
+        max_batch_size = getattr(self, 'redis_batch_size', 16)
+
+        # Schedule requests in batches while the engine has capacity
         for req in self.next_requests():
+            # Check if we've reached our batch limit
+            if scheduled >= max_batch_size:
+                break
+
             # see https://github.com/scrapy/scrapy/issues/5994
             if scrapy_version >= (2, 6):
                 self.crawler.engine.crawl(req)
             else:
                 self.crawler.engine.crawl(req, spider=self)
+
+            scheduled += 1
+
+            # Check if engine is getting close to capacity
+            # This allows for more efficient batch processing
+            if hasattr(self.crawler.engine, 'downloader') and hasattr(self.crawler.engine.downloader, 'active'):
+                active_requests = len(self.crawler.engine.downloader.active)
+                concurrent_limit = self.crawler.settings.getint('CONCURRENT_REQUESTS', 16)
+
+                # If we're approaching the limit, yield control back
+                if active_requests >= concurrent_limit * 0.8:  # 80% threshold
+                    break
+
+        if scheduled > 0:
+            self.logger.debug(f"Scheduled {scheduled} requests from Redis")
 
     def spider_idle(self):
         """

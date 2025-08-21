@@ -3,8 +3,8 @@ from datetime import datetime
 from scrapy.statscollectors import StatsCollector
 
 from .connection import from_settings as redis_from_settings
-from .defaults import SCHEDULER_PERSIST, STATS_KEY
-from .utils import convert_bytes_to_str
+from . import defaults
+from .utils import convert_bytes_to_str, get_effective_key
 
 
 class RedisStatsCollector(StatsCollector):
@@ -17,16 +17,26 @@ class RedisStatsCollector(StatsCollector):
         self.server = redis_from_settings(crawler.settings)
         self.spider = spider
         self.spider_name = spider.name if spider else crawler.spidercls.name
-        self.stats_key = crawler.settings.get("STATS_KEY", STATS_KEY)
-        self.persist = crawler.settings.get("SCHEDULER_PERSIST", SCHEDULER_PERSIST)
+        self.stats_key = crawler.settings.get("STATS_KEY", defaults.STATS_KEY)
+        self.persist = crawler.settings.get("SCHEDULER_PERSIST", defaults.SCHEDULER_PERSIST)
+        self.settings = crawler.settings
 
     def _get_key(self, spider=None):
         """Return the hash name of stats"""
+        spider_name = None
         if spider:
-            return self.stats_key % {"spider": spider.name}
-        if self.spider:
-            return self.stats_key % {"spider": self.spider.name}
-        return self.stats_key % {"spider": self.spider_name or "scrapy"}
+            spider_name = spider.name
+        elif self.spider:
+            spider_name = self.spider.name
+        else:
+            spider_name = self.spider_name or "scrapy"
+            
+        return get_effective_key(
+            self.settings,
+            self.stats_key,
+            defaults.JOB_SCOPED_STATS_KEY,
+            spider_name
+        )
 
     @classmethod
     def from_crawler(cls, crawler):

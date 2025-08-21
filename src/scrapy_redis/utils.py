@@ -1,4 +1,5 @@
 import json
+import os
 from json import JSONDecodeError
 
 import six
@@ -42,3 +43,59 @@ def convert_bytes_to_str(data, encoding="utf-8"):
     elif isinstance(data, tuple):
         return map(convert_bytes_to_str, data)
     return data
+
+
+def get_redis_version(server):
+    """Get Redis server version as tuple of integers."""
+    try:
+        info = server.info()
+        version_str = info['redis_version']
+        return tuple(int(x) for x in version_str.split('.'))
+    except Exception:
+        return (0, 0, 0)
+
+
+def supports_bzpopmin(server):
+    """Check if Redis server supports BZPOPMIN (requires Redis >= 5.0)."""
+    version = get_redis_version(server)
+    return version >= (5, 0, 0)
+
+
+def expand_key_template(template, spider_name=None, job_id=None):
+    """Expand key template with spider name and job_id if available."""
+    params = {}
+    
+    if spider_name:
+        params['spider'] = spider_name
+        params['name'] = spider_name  # backwards compatibility
+    
+    if job_id:
+        params['job_id'] = job_id
+    
+    # Add timestamp for legacy compatibility
+    params['timestamp'] = int(__import__('time').time())
+    
+    try:
+        return template % params
+    except KeyError:
+        # Missing required parameter, return template as-is
+        return template
+
+
+def get_job_id_from_settings(settings):
+    """Get job_id from settings or environment."""
+    job_id = settings.get('JOB_ID')
+    if not job_id:
+        job_id = os.environ.get('SCRAPY_JOB')
+    return job_id
+
+
+def get_effective_key(settings, legacy_key, job_scoped_key, spider_name=None):
+    """Get the effective key based on whether job-scoped keys are enabled."""
+    use_job_scoped = settings.getbool('USE_JOB_SCOPED_KEYS', False)
+    job_id = get_job_id_from_settings(settings)
+    
+    if use_job_scoped and job_id:
+        return expand_key_template(job_scoped_key, spider_name, job_id)
+    else:
+        return expand_key_template(legacy_key, spider_name, job_id)
